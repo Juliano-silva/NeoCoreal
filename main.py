@@ -23,6 +23,7 @@ COR_ROSA = "#ff2bd6"
 COR_TEXTO = "#e6f1ff"
 
 CDR_FILTER_TIFF = 772
+CDR_EXPORT_CURRENT_PAGE = 1
 CDR_COMPRESSION_JPEG = 8
 CDR_IMAGE_TYPE_POR_MODELO = {
     0: 4,  # RGB: 24 bits
@@ -60,6 +61,47 @@ def criar_opcoes_exportacao(corel, doc, modo_cor):
     return opcoes
 
 
+def criar_caminhos_exportacao(
+    pasta_destino, nome_base, numeros_paginas, sufixos_paginas
+):
+    caminhos = []
+    caminhos_reservados = set()
+
+    for numero_pagina in numeros_paginas:
+        if numero_pagina == 1:
+            sufixo = ""
+        elif numero_pagina <= len(sufixos_paginas) + 1:
+            sufixo = sufixos_paginas[numero_pagina - 2]
+            if not sufixo.strip():
+                sufixo = ""
+        elif sufixos_paginas and sufixos_paginas[-1].strip():
+            sufixo = f"{sufixos_paginas[-1]}{numero_pagina}"
+        else:
+            sufixo = ""
+
+        nome_arquivo = f"{nome_base}_Pagina{numero_pagina}{sufixo}"
+        caminho = os.path.join(pasta_destino, f"{nome_arquivo}.tif")
+        chave_caminho = os.path.normcase(os.path.abspath(caminho))
+
+        if chave_caminho in caminhos_reservados or os.path.exists(caminho):
+            nome_arquivo = f"{nome_arquivo} - página {numero_pagina}"
+            caminho = os.path.join(pasta_destino, f"{nome_arquivo}.tif")
+            chave_caminho = os.path.normcase(os.path.abspath(caminho))
+
+        numero_versao = 2
+        while os.path.exists(caminho) or chave_caminho in caminhos_reservados:
+            caminho = os.path.join(
+                pasta_destino, f"{nome_arquivo} ({numero_versao}).tif"
+            )
+            chave_caminho = os.path.normcase(os.path.abspath(caminho))
+            numero_versao += 1
+
+        caminhos.append(caminho)
+        caminhos_reservados.add(chave_caminho)
+
+    return caminhos
+
+
 def converter_pastas(
     pasta_cdr,
     pasta_tif,
@@ -72,9 +114,6 @@ def converter_pastas(
     quantidade_exportada = 0
     erros = []
     cancelada = False
-
-    if not sufixos_paginas:
-        raise ValueError("Configure ao menos um sufixo de página.")
 
     corel = None
 
@@ -127,26 +166,61 @@ def converter_pastas(
                 try:
                     registrar_log(f"Exportando: {arquivo_cdr}")
                     doc = corel.OpenDocument(arquivo_cdr)
-                    opcoes = criar_opcoes_exportacao(corel, doc, modo_cor)
+                    doc.Activate()
                     quantidade_paginas = int(doc.Pages.Count)
-                    for numero_pagina in range(1, quantidade_paginas + 1):
+                    if quantidade_paginas < 1:
+                        raise ValueError(
+                            f"O documento não contém páginas: {arquivo_cdr}"
+                        )
+                    registrar_log(
+                        f"{quantidade_paginas} página(s) encontrada(s) em "
+                        f"{nome_arquivo}."
+                    )
+                    quantidade_paginas_exportar = min(
+                        quantidade_paginas, len(sufixos_paginas) + 1
+                    )
+                    numeros_paginas = range(1, quantidade_paginas_exportar + 1)
+                    if quantidade_paginas_exportar < quantidade_paginas:
+                        registrar_log(
+                            f"{quantidade_paginas - quantidade_paginas_exportar} "
+                            f"página(s) ignorada(s): quantidade de inputs configurados "
+                            f"para {nome_arquivo}."
+                        )
+                    paginas = [
+                        (numero_pagina, doc.Pages.Item(numero_pagina))
+                        for numero_pagina in numeros_paginas
+                    ]
+                    opcoes = criar_opcoes_exportacao(corel, doc, modo_cor)
+                    opcoes_paleta = corel.CreateStructPaletteOptions()
+                    caminhos_exportacao = criar_caminhos_exportacao(
+                        pasta_tif_atual,
+                        nome_sem_extensao,
+                        numeros_paginas,
+                        sufixos_paginas,
+                    )
+                    for (numero_pagina, pagina), arquivo_tif in zip(
+                        paginas, caminhos_exportacao
+                    ):
                         if cancelamento.is_set():
                             cancelada = True
                             break
-                        if numero_pagina == 1:
-                            sufixo = ""
-                        elif numero_pagina <= len(sufixos_paginas) + 1:
-                            sufixo = sufixos_paginas[numero_pagina - 2]
-                        else:
-                            sufixo = f"{sufixos_paginas[-1]}{numero_pagina}"
-                        arquivo_tif = os.path.join(
-                            pasta_tif_atual, f"{nome_sem_extensao}{sufixo}.tif"
-                        )
                         try:
-                            doc.Pages.Item(numero_pagina).Activate()
-                            filtro = doc.ExportEx(
-                                arquivo_tif, CDR_FILTER_TIFF, 0, opcoes, None
+                            registrar_log(
+                                f"Exportando página {numero_pagina} de "
+                                f"{quantidade_paginas}: {arquivo_tif}"
                             )
+                            pagina.Activate()
+                            filtro = doc.ExportEx(
+                                arquivo_tif,
+                                CDR_FILTER_TIFF,
+                                CDR_EXPORT_CURRENT_PAGE,
+                                opcoes,
+                                opcoes_paleta,
+                            )
+                            if filtro is None:
+                                raise RuntimeError(
+                                    "O CorelDRAW não iniciou a exportação TIFF."
+                                )
                             filtro.Finish()
                             quantidade_exportada += 1
                             registrar_log(
@@ -349,7 +423,7 @@ def iniciar_exportacao(
 
 def criar_interface():
     janela = tk.Tk()
-    janela.title("NeoCoreal | CDR para TIFF")
+    janela.title("NeoCorel | CDR para TIFF")
     janela.iconbitmap(caminho_recurso("neocoreal.ico"))
     janela.configure(bg=COR_FUNDO)
     janela.resizable(True, True)
@@ -360,6 +434,8 @@ def criar_interface():
     campo_modo_cor = tk.StringVar(value="Original")
     campos_sufixo_pagina = []
     entradas_sufixo_pagina = []
+    etiquetas_sufixo_pagina = []
+    botoes_remover_sufixo = []
 
     janela.grid_columnconfigure(0, weight=1)
 
@@ -475,17 +551,30 @@ def criar_interface():
     quadro_campos_sufixo.bind("<Configure>", atualizar_tamanho_lista)
     lista_sufixos.bind("<Configure>", ajustar_largura_lista)
 
+    def atualizar_linhas_sufixo():
+        for indice, (etiqueta, entrada, botao_remover) in enumerate(
+            zip(
+                etiquetas_sufixo_pagina,
+                entradas_sufixo_pagina,
+                botoes_remover_sufixo,
+            )
+        ):
+            linha = indice + 1
+            etiqueta.config(text=f"Sufixo da página {indice + 2}:")
+            etiqueta.grid(row=linha, column=0, padx=8, pady=4, sticky="w")
+            entrada.grid(row=linha, column=1, padx=8, pady=4, sticky="ew")
+            botao_remover.grid(row=linha, column=2, padx=8, pady=4)
+        atualizar_tamanho_lista()
+
     def adicionar_campo_sufixo(valor=""):
-        numero_pagina = len(campos_sufixo_pagina) + 2
         campo_sufixo = tk.StringVar(value=valor)
         campos_sufixo_pagina.append(campo_sufixo)
-        linha = numero_pagina - 1
-        tk.Label(
+        etiqueta_sufixo = tk.Label(
             quadro_campos_sufixo,
-            text=f"Sufixo da página {numero_pagina}:",
+            text="",
             bg=COR_FUNDO,
             fg=COR_TEXTO,
-        ).grid(row=linha, column=0, padx=8, pady=4, sticky="w")
+        )
         entrada_sufixo = tk.Entry(
             quadro_campos_sufixo,
             textvariable=campo_sufixo,
@@ -497,15 +586,34 @@ def criar_interface():
             highlightbackground=COR_CIANO,
             highlightcolor=COR_CIANO,
         )
-        entrada_sufixo.grid(
-            row=linha, column=1, padx=8, pady=4, sticky="ew"
+        botao_remover = tk.Button(
+            quadro_campos_sufixo,
+            text="❌",
+            command=lambda campo=campo_sufixo: remover_campo_sufixo(campo),
+            bg=COR_PAINEL,
+            fg=COR_ROSA,
+            activebackground=COR_ROSA,
+            activeforeground=COR_FUNDO,
+            relief=tk.FLAT,
+            padx=8,
         )
-        quadro_campos_sufixo.grid_columnconfigure(1, weight=1)
+        etiquetas_sufixo_pagina.append(etiqueta_sufixo)
         entradas_sufixo_pagina.append(entrada_sufixo)
-        atualizar_tamanho_lista()
+        botoes_remover_sufixo.append(botao_remover)
+        atualizar_linhas_sufixo()
         lista_sufixos.after_idle(lambda: lista_sufixos.yview_moveto(1.0))
 
-    adicionar_campo_sufixo(" - alça")
+    def remover_campo_sufixo(campo_sufixo):
+        indice = campos_sufixo_pagina.index(campo_sufixo)
+        campos_sufixo_pagina.pop(indice)
+        etiquetas_sufixo_pagina.pop(indice).destroy()
+        entradas_sufixo_pagina.pop(indice).destroy()
+        botoes_remover_sufixo.pop(indice).destroy()
+        atualizar_linhas_sufixo()
+
+    quadro_campos_sufixo.grid_columnconfigure(1, weight=1)
+    adicionar_campo_sufixo(" FUNDO")
+    adicionar_campo_sufixo(" TIRA")
     botao_adicionar_pagina = tk.Button(
         opcoes_exportacao,
         text="ADICIONAR PÁGINA",
@@ -621,6 +729,7 @@ def criar_interface():
             tuple(
                 [(seletor_modo_cor, "readonly"), (botao_adicionar_pagina, tk.NORMAL)]
                 + [(entrada, tk.NORMAL) for entrada in entradas_sufixo_pagina]
+                + [(botao, tk.NORMAL) for botao in botoes_remover_sufixo]
             ),
             status,
             progresso,
